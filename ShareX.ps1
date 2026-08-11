@@ -159,6 +159,26 @@ function Get-HistoryFiles {
     Get-ChildItem $OutputDirectory -Filter '*.png' -File | Sort-Object LastWriteTime -Descending | Select-Object -First ([int]$Config.HistoryLimit)
 }
 
+function Enable-FileDrag($Item) {
+    $state = @{ Start = $null }
+    $Item.Add_PreviewMouseLeftButtonDown(({
+        $state.Start = $args[1].GetPosition($Item)
+        if ($Item.IsSelected) { $args[1].Handled = $true }
+    }).GetNewClosure())
+    $Item.Add_PreviewMouseMove(({
+        if ($null -eq $state.Start -or $args[1].LeftButton -ne [Windows.Input.MouseButtonState]::Pressed) { return }
+        $point = $args[1].GetPosition($Item); if ([Math]::Abs($point.X - $state.Start.X) -lt 6 -and [Math]::Abs($point.Y - $state.Start.Y) -lt 6) { return }
+        $fileList = New-Object System.Collections.Specialized.StringCollection; $fileList.Add([string]$Item.Tag) | Out-Null
+        $data = New-Object Windows.DataObject; $data.SetFileDropList($fileList)
+        [Windows.DragDrop]::DoDragDrop($Item, $data, ([Windows.DragDropEffects]::Copy -bor [Windows.DragDropEffects]::Link)) | Out-Null; $state.Start = $null
+    }).GetNewClosure())
+}
+
+function Open-ScreenshotLocation([string]$Path) {
+    if (-not $Path) { return }
+    Start-Process explorer.exe -ArgumentList "/select,`"$Path`""
+}
+
 function Refresh-HistoryList {
     if (-not $script:HistoryList) { return }
     $selected = @($script:HistoryList.SelectedItems | ForEach-Object { $_.Tag })
@@ -168,7 +188,7 @@ function Refresh-HistoryList {
         $card = New-Object Windows.Controls.StackPanel
         $thumbnail = New-Object Windows.Controls.Image; $thumbnail.Source = New-ImageSource $file.FullName; $thumbnail.Width = 158; $thumbnail.Height = 92; $thumbnail.Stretch = 'Uniform'
         $name = New-Object Windows.Controls.TextBlock; $name.Text = $file.Name; $name.Width = 158; $name.TextAlignment = 'Center'; $name.TextTrimming = 'CharacterEllipsis'
-        $card.Children.Add($thumbnail) | Out-Null; $card.Children.Add($name) | Out-Null; $item.Content = $card; $script:HistoryList.Items.Add($item) | Out-Null
+        $card.Children.Add($thumbnail) | Out-Null; $card.Children.Add($name) | Out-Null; $item.Content = $card; Enable-FileDrag $item; $script:HistoryList.Items.Add($item) | Out-Null
         if ($selected -contains $file.FullName) { $item.IsSelected = $true }
     }
 }
@@ -361,7 +381,7 @@ function Show-MainWindow {
     $root.Children.Add($captureGrid) | Out-Null
 
     $actions = New-Object Windows.Controls.StackPanel; $actions.Orientation = 'Horizontal'; $actions.Margin = '0,12,0,6'
-    foreach ($entry in @(@('Open history', { Show-History }), @('Edit selected', { if ($historyList.SelectedItem) { Edit-Image $historyList.SelectedItem.Tag } }), @('Collage vertical', { $paths = @($historyList.SelectedItems | ForEach-Object { $_.Tag }); if ($paths.Count -ge 2) { Build-Collage $paths $true } else { [Windows.MessageBox]::Show('Select at least two screenshots.') | Out-Null } }), @('Collage horizontal', { $paths = @($historyList.SelectedItems | ForEach-Object { $_.Tag }); if ($paths.Count -ge 2) { Build-Collage $paths $false } else { [Windows.MessageBox]::Show('Select at least two screenshots.') | Out-Null } }))) { $button = New-Object Windows.Controls.Button; $button.Content = $entry[0]; $button.Margin = '3'; $button.Add_Click($entry[1]); $actions.Children.Add($button) | Out-Null }
+    foreach ($entry in @(@('Open history', { Show-History }), @('Edit selected', { if ($historyList.SelectedItem) { Edit-Image $historyList.SelectedItem.Tag } }), @('Collage vertical', { $paths = @($historyList.SelectedItems | ForEach-Object { $_.Tag }); if ($paths.Count -ge 2) { Build-Collage $paths $true } else { [Windows.MessageBox]::Show('Select at least two screenshots.') | Out-Null } }), @('Collage horizontal', { $paths = @($historyList.SelectedItems | ForEach-Object { $_.Tag }); if ($paths.Count -ge 2) { Build-Collage $paths $false } else { [Windows.MessageBox]::Show('Select at least two screenshots.') | Out-Null } }), @('Open location', { if ($historyList.SelectedItem) { Open-ScreenshotLocation $historyList.SelectedItem.Tag } else { [Windows.MessageBox]::Show('Select a screenshot first.') | Out-Null } }))) { $button = New-Object Windows.Controls.Button; $button.Content = $entry[0]; $button.Margin = '3'; $button.Add_Click($entry[1]); $actions.Children.Add($button) | Out-Null }
     $root.Children.Add($actions) | Out-Null
 
     $historyTitle = New-Object Windows.Controls.TextBlock; $historyTitle.Text = 'Screenshot history'; $historyTitle.FontSize = 16; $historyTitle.FontWeight = 'Bold'; $historyTitle.Margin = '0,6,0,6'; $root.Children.Add($historyTitle) | Out-Null
