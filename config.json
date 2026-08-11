@@ -1,0 +1,8 @@
+{
+  "CaptureRegionHotkey": "PageUp",
+  "CaptureWindowHotkey": "PageDown",
+  "CaptureScreenHotkey": "Ctrl+Shift+6",
+  "HistoryHotkey": "Ctrl+Shift+7",
+  "OutputDirectory": "",
+  "HistoryLimit": 100
+}
