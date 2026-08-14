@@ -61,6 +61,8 @@ function New-ImageName {
 function Save-Bitmap([System.Drawing.Bitmap]$Bitmap) {
     $path = New-ImageName
     $Bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    try { [System.Windows.Forms.Clipboard]::SetImage($Bitmap); Write-Log 'Screenshot copied to clipboard.' }
+    catch { Write-Log "Could not copy screenshot to clipboard: $($_.Exception.Message)" 'WARN' }
     $Bitmap.Dispose()
     $script:LastImage = $path
     if ($script:HistoryList) { try { Refresh-HistoryList } catch { Write-Log "History refresh failed after saving ${path}: $($_.Exception.ToString())" 'ERROR' } }
@@ -100,6 +102,15 @@ function Capture-ActiveWindow {
 function Select-Region {
     Write-Log 'Region capture overlay requested.'
     $screen = Get-VirtualScreen
+    $frozen = New-Object System.Drawing.Bitmap $screen.Width, $screen.Height
+    $frozenGraphics = [System.Drawing.Graphics]::FromImage($frozen)
+    $frozenGraphics.CopyFromScreen($screen.X, $screen.Y, 0, 0, $frozen.Size)
+    $frozenGraphics.Dispose()
+    $frozenStream = New-Object IO.MemoryStream
+    $frozen.Save($frozenStream, [System.Drawing.Imaging.ImageFormat]::Png)
+    $frozen.Dispose(); $frozenStream.Position = 0
+    $frozenSource = New-Object Windows.Media.Imaging.BitmapImage
+    $frozenSource.BeginInit(); $frozenSource.CacheOption = 'OnLoad'; $frozenSource.StreamSource = $frozenStream; $frozenSource.EndInit(); $frozenSource.Freeze(); $frozenStream.Dispose()
     $window = New-Object Windows.Window
     $window.WindowStyle = 'None'
     $window.ResizeMode = 'NoResize'
@@ -109,13 +120,17 @@ function Select-Region {
     $window.Topmost = $true
     $window.ShowInTaskbar = $false
     $window.AllowsTransparency = $true
-    $window.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(70, 0, 0, 0))
+    $window.Background = New-Object Windows.Media.ImageBrush $frozenSource
+    $window.Background.Stretch = 'None'; $window.Background.AlignmentX = 'Left'; $window.Background.AlignmentY = 'Top'
 
     $canvas = New-Object Windows.Controls.Canvas
     # Transparent backgrounds still participate in WPF hit testing; a null Canvas background does not.
     $canvas.Background = [Windows.Media.Brushes]::Transparent
     $canvas.IsHitTestVisible = $true
     $window.Content = $canvas
+    $dim = New-Object Windows.Shapes.Rectangle
+    $dim.Fill = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(70, 0, 0, 0)); $dim.Width = $screen.Width; $dim.Height = $screen.Height; $dim.IsHitTestVisible = $false
+    $canvas.Children.Add($dim) | Out-Null
     $selection = New-Object Windows.Shapes.Rectangle
     $selection.Stroke = [Windows.Media.Brushes]::DodgerBlue
     $selection.StrokeThickness = 2
@@ -174,6 +189,10 @@ function Enable-FileDrag($Item) {
     }).GetNewClosure())
 }
 
+function Open-Screenshot([string]$Path) {
+    if ($Path) { Start-Process -FilePath $Path }
+}
+
 function Open-ScreenshotLocation([string]$Path) {
     if (-not $Path) { return }
     Start-Process explorer.exe -ArgumentList "/select,`"$Path`""
@@ -193,9 +212,10 @@ function Refresh-HistoryList {
     }
 }
 
-function Show-Prompt([string]$Title, [string]$Default = '') {
+function Show-Prompt([string]$Title, [string]$Default = '', [Windows.Window]$Owner = $null) {
     $dialog = New-Object Windows.Window
-    $dialog.Title = $Title; $dialog.Width = 360; $dialog.Height = 130; $dialog.WindowStartupLocation = 'CenterOwner'; $dialog.ResizeMode = 'NoResize'
+    $dialog.Title = $Title; $dialog.Width = 360; $dialog.Height = 130; $dialog.ResizeMode = 'NoResize'
+    if ($Owner) { $dialog.Owner = $Owner; $dialog.WindowStartupLocation = 'Manual'; $dialog.Left = $Owner.Left + 20; $dialog.Top = $Owner.Top + 60 } else { $dialog.WindowStartupLocation = 'CenterScreen' }
     $panel = New-Object Windows.Controls.StackPanel; $panel.Margin = '12'
     $input = New-Object Windows.Controls.TextBox; $input.Text = $Default; $input.Margin = '0,0,0,10'
     $ok = New-Object Windows.Controls.Button; $ok.Content = 'OK'; $ok.Width = 70; $ok.HorizontalAlignment = 'Right'; $ok.IsDefault = $true
@@ -233,7 +253,7 @@ function Enable-OverlayResize($Element, $Canvas) {
     }).GetNewClosure())
     $handle.Add_DragDelta(({
         if (-not $resize.Active) { return }; $dx = $args[1].HorizontalChange; $dy = $args[1].VerticalChange
-        if ($Element -is [Windows.Shapes.Rectangle]) { $Element.Width = [Math]::Max(10, $Element.Width + $dx); $Element.Height = [Math]::Max(10, $Element.Height + $dy) } else { $Element.FontSize = [Math]::Max(8, $Element.FontSize + (($dx + $dy) / 4)) }
+        if ($Element -is [Windows.Shapes.Rectangle]) { $Element.Width = [Math]::Max(10, $Element.Width + $dx); $Element.Height = [Math]::Max(10, $Element.Height + $dy) } else { $Element.FontSize = [Math]::Max(8, $resize.FontSize + (($args[1].CumulativeHorizontalChange + $args[1].CumulativeVerticalChange) / 4)) }
         Update-ResizeHandle $Element $handle
     }).GetNewClosure())
     $handle.Add_DragCompleted(({
@@ -288,7 +308,7 @@ function Edit-Image([string]$Path) {
     $overlay.Add_MouseLeftButtonDown({
         $point = $args[1].GetPosition($overlay)
         Write-Log "Editor click at X=$($point.X) Y=$($point.Y), mode=$($state.Mode)"
-        if ($state.Mode -eq 'text') { $value = Show-Prompt 'Text'; if ($value) { $label = New-Object Windows.Controls.TextBlock; $label.Text = $value; $label.FontSize = 24; $label.FontWeight = 'Bold'; $label.Foreground = [Windows.Media.Brushes]::Red; $label.Background = [Windows.Media.Brushes]::Transparent; [Windows.Controls.Canvas]::SetLeft($label, $point.X); [Windows.Controls.Canvas]::SetTop($label, $point.Y); $overlay.Children.Add($label) | Out-Null; Enable-OverlayDrag $label $overlay; Enable-OverlayResize $label $overlay; Write-Log 'Editor text added.' }; return }
+        if ($state.Mode -eq 'text') { $value = Show-Prompt 'Text' '' $window; if ($value) { $label = New-Object Windows.Controls.TextBlock; $label.Text = $value; $label.FontSize = 24; $label.FontWeight = 'Bold'; $label.Foreground = [Windows.Media.Brushes]::Red; $label.Background = [Windows.Media.Brushes]::Transparent; [Windows.Controls.Canvas]::SetLeft($label, $point.X); [Windows.Controls.Canvas]::SetTop($label, $point.Y); $overlay.Children.Add($label) | Out-Null; Enable-OverlayDrag $label $overlay; Enable-OverlayResize $label $overlay; Write-Log 'Editor text added.' }; return }
         $state.DragStart = $point; $state.Draft = New-Object Windows.Shapes.Rectangle; $state.Draft.Fill = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(90, 255, 235, 0)); $overlay.Children.Add($state.Draft) | Out-Null; Enable-OverlayDrag $state.Draft $overlay; Enable-OverlayResize $state.Draft $overlay; $overlay.CaptureMouse() | Out-Null
     })
     $overlay.Add_MouseMove({ if ($null -eq $state.DragStart) { return }; $point = $args[1].GetPosition($overlay); [Windows.Controls.Canvas]::SetLeft($state.Draft, [Math]::Min($state.DragStart.X, $point.X)); [Windows.Controls.Canvas]::SetTop($state.Draft, [Math]::Min($state.DragStart.Y, $point.Y)); $state.Draft.Width = [Math]::Abs($point.X - $state.DragStart.X); $state.Draft.Height = [Math]::Abs($point.Y - $state.DragStart.Y); if ($state.Draft.Tag) { Update-ResizeHandle $state.Draft $state.Draft.Tag } })
@@ -330,7 +350,7 @@ function Show-History {
     $edit = New-Object Windows.Controls.Button; $edit.Content = 'Edit selected'; $edit.Margin = '2'; $collage = New-Object Windows.Controls.Button; $collage.Content = 'Collage'; $collage.Margin = '2'; $refresh = New-Object Windows.Controls.Button; $refresh.Content = 'Refresh'; $refresh.Margin = '2'; @($edit,$collage,$refresh) | ForEach-Object { $buttons.Children.Add($_) | Out-Null }
     $list = New-Object Windows.Controls.ListBox; $list.SelectionMode = 'Single'; [Windows.Controls.DockPanel]::SetDock($buttons, 'Bottom'); $dock.Children.Add($buttons) | Out-Null; $dock.Children.Add($list) | Out-Null; $window.Content = $dock
     $load = { $list.Items.Clear(); foreach ($file in (Get-HistoryFiles)) { $item = New-Object Windows.Controls.ListBoxItem; $item.Content = $file.Name; $item.Tag = $file.FullName; $list.Items.Add($item) | Out-Null } }; & $load
-    $refresh.Add_Click({ & $load }); $edit.Add_Click({ if ($list.SelectedItem) { Edit-Image $list.SelectedItem.Tag } }); $collage.Add_Click({ New-Collage }); $list.Add_MouseDoubleClick({ if ($list.SelectedItem) { Edit-Image $list.SelectedItem.Tag } }); $window.Add_Closed({ $script:HistoryWindow = $null }); $script:HistoryWindow = $window; $window.Show()
+    $refresh.Add_Click({ & $load }); $edit.Add_Click({ if ($list.SelectedItem) { Edit-Image $list.SelectedItem.Tag } }); $collage.Add_Click({ New-Collage }); $list.Add_MouseDoubleClick({ if ($list.SelectedItem) { Open-Screenshot $list.SelectedItem.Tag } }); $window.Add_Closed({ $script:HistoryWindow = $null }); $script:HistoryWindow = $window; $window.Show()
 }
 
 function Parse-Hotkey([string]$Value) {
@@ -385,7 +405,7 @@ function Show-MainWindow {
     $root.Children.Add($actions) | Out-Null
 
     $historyTitle = New-Object Windows.Controls.TextBlock; $historyTitle.Text = 'Screenshot history'; $historyTitle.FontSize = 16; $historyTitle.FontWeight = 'Bold'; $historyTitle.Margin = '0,6,0,6'; $root.Children.Add($historyTitle) | Out-Null
-    $historyList = New-Object Windows.Controls.ListBox; $historyList.Height = 320; $historyList.SelectionMode = 'Extended'; [Windows.Controls.ScrollViewer]::SetHorizontalScrollBarVisibility($historyList, [Windows.Controls.ScrollBarVisibility]::Disabled); $itemsPanel = New-Object Windows.Controls.ItemsPanelTemplate; $wrapFactory = New-Object Windows.FrameworkElementFactory ([Windows.Controls.WrapPanel]); $wrapFactory.SetValue([Windows.Controls.WrapPanel]::OrientationProperty, [Windows.Controls.Orientation]::Horizontal); $itemsPanel.VisualTree = $wrapFactory; $historyList.ItemsPanel = $itemsPanel; $historyList.Add_MouseDoubleClick({ if ($historyList.SelectedItem) { Edit-Image $historyList.SelectedItem.Tag } }); $script:HistoryList = $historyList; Refresh-HistoryList; $root.Children.Add($historyList) | Out-Null
+    $historyList = New-Object Windows.Controls.ListBox; $historyList.Height = 320; $historyList.SelectionMode = 'Extended'; [Windows.Controls.ScrollViewer]::SetHorizontalScrollBarVisibility($historyList, [Windows.Controls.ScrollBarVisibility]::Disabled); $itemsPanel = New-Object Windows.Controls.ItemsPanelTemplate; $wrapFactory = New-Object Windows.FrameworkElementFactory ([Windows.Controls.WrapPanel]); $wrapFactory.SetValue([Windows.Controls.WrapPanel]::OrientationProperty, [Windows.Controls.Orientation]::Horizontal); $itemsPanel.VisualTree = $wrapFactory; $historyList.ItemsPanel = $itemsPanel; $historyList.Add_MouseDoubleClick({ if ($historyList.SelectedItem) { Open-Screenshot $historyList.SelectedItem.Tag } }); $script:HistoryList = $historyList; Refresh-HistoryList; $root.Children.Add($historyList) | Out-Null
 
     $settingsTitle = New-Object Windows.Controls.TextBlock; $settingsTitle.Text = 'Global hotkeys'; $settingsTitle.FontSize = 16; $settingsTitle.FontWeight = 'Bold'; $settingsTitle.Margin = '0,4,0,6'; $root.Children.Add($settingsTitle) | Out-Null
     $settings = New-Object Windows.Controls.Grid
